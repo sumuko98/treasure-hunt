@@ -126,7 +126,41 @@ window.HUNT = {"v":2,"iters":100000,"title":"The Alchemist's Advent: the Fifth C
   const N = H.rooms.length;
 
   let session = null; // {pin, team:{i,name,colour,login}}
-  const resKey = () => 'hunt.res.' + session.pin;
+
+  const raceStateKey = 'hunt.race.' + H.live?.topic;
+  let race = store.get(raceStateKey) || '';
+  const raceKey = key => race ? key + '.race.' + race : key;
+  let checkingRace = false;
+  async function checkRace() {
+    if (!H.live || checkingRace) return;
+    checkingRace = true;
+    try {
+      const response = await fetch(H.live.server + '/' + H.live.topic + '/json?poll=1&since=all',
+        { cache: 'no-store', signal: AbortSignal.timeout(5000) });
+      if (!response.ok) return;
+      const starts = [];
+      let sawControl = false;
+      for (const line of (await response.text()).split('\n')) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.event !== 'message') continue;
+        const command = String(event.message).split('.')[0];
+        if (command === 'S_c11b6fbd') starts.push(event.id);
+        else if (command === 'U_c11b6fbd') starts.pop();
+        else continue;
+        sawControl = true;
+      }
+      const latest = starts.at(-1) || '';
+      if (sawControl && latest !== race) {
+        race = latest;
+        store.set(raceStateKey, race);
+        if (session) ping(session.team.login);
+        await go();
+      }
+    } catch (_) { /* Keep playing the last known race while offline. */ }
+    finally { checkingRace = false; }
+  }
+  const resKey = () => raceKey('hunt.res.' + session.pin);
   // Only results in the current format count. Leftovers from older test versions are dropped
   // (they used to crash the page and leave it stuck on "Opening…").
   const validRes = r => !!r && typeof r === 'object' && typeof r.img === 'string' && r.img.startsWith('data:image') &&
@@ -148,28 +182,32 @@ window.HUNT = {"v":2,"iters":100000,"title":"The Alchemist's Advent: the Fifth C
   function ping(k) {
     try {
       if (!L || !k) return;
-      const sent = jget('hunt.sent', '{}'), q = jget('hunt.q', '[]');
+      const sent = jget(raceKey('hunt.sent'), '{}'), q = jget(raceKey('hunt.q'), '[]');
       if (sent[k] || q.some(e => e && e.k === k)) return;
-      q.push({ k, ts: Math.floor(Date.now() / 1000) }); store.set('hunt.q', JSON.stringify(q));
+      q.push({ k, ts: Math.floor(Date.now() / 1000) }); store.set(raceKey('hunt.q'), JSON.stringify(q));
       flush();
     } catch (e) { /* progress reporting must never break the game */ }
   }
   async function flush() {
     if (!L || flushing) return; flushing = true;
     try {
-      const rest = [], sent = jget('hunt.sent', '{}');
-      for (const e of jget('hunt.q', '[]')) {
+      const queueKey = raceKey('hunt.q'), sentKey = raceKey('hunt.sent');
+      const sent = jget(raceKey('hunt.sent'), '{}');
+      for (const e of jget(queueKey, '[]')) {
+        if (queueKey !== raceKey('hunt.q')) break;
         if (!e || !e.k) continue;
         try {
           const r = await fetch(`${L.server}/${L.topic}`, { method: 'POST', body: `${e.k}.${e.ts}` });
           if (!r.ok) throw new Error('http'); sent[e.k] = 1;
-        } catch (err) { rest.push(e); }
+        } catch (err) { continue; }
       }
-      store.set('hunt.q', JSON.stringify(rest)); store.set('hunt.sent', JSON.stringify(sent));
+      store.set(queueKey, JSON.stringify(jget(queueKey, '[]').filter(e => e && !sent[e.k]))); store.set(sentKey, JSON.stringify(sent));
     } catch (e) { /* ignore */ }
     flushing = false;
   }
-  window.addEventListener('online', flush); setInterval(flush, 15000);
+  const sync = async () => { await checkRace(); await flush(); };
+  window.addEventListener('online', sync); setInterval(sync, 15000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) sync(); });
 
   function view(inner) {
     const t = session ? `<span class="badge"><i></i>Team ${esc(session.team.name)}</span>` : '';
@@ -264,10 +302,12 @@ window.HUNT = {"v":2,"iters":100000,"title":"The Alchemist's Advent: the Fifth C
 
   /* ---------- stage (a QR was scanned) ---------- */
   async function stageView(token) {
+    const stageRace = race;
     view(`<div class="card"><p class="dim">Opening…</p></div>`);
     const entry = H.stages[await C.stageId(token)];
     if (!entry) return view(`<div class="card bad"><h2>Unknown QR code</h2><p>This code is not part of the hunt, or the link is incomplete. Try scanning it again.</p></div>${logoutBtn}`), bindLogout();
     const p = await C.open(token + '|' + session.pin, entry, H.iters);
+    if (stageRace !== race) return;
     if (!p) {
       // Is the saved login itself still valid? If not, ask for the PIN again instead of blaming the QR.
       const mine = H.teams[session.team && session.team.i];
@@ -296,6 +336,7 @@ window.HUNT = {"v":2,"iters":100000,"title":"The Alchemist's Advent: the Fifth C
       for (const u of p.unlock) { res = await C.open(a + '|' + token, u, H.iters); if (res) break; }
       if (!res) { b.disabled = false; m.textContent = 'The Owl blinks. Not quite. Think again.'; m.className = 'msg bad'; return; }
       const reward = await C.openKey(res.key, H.rewards[res.piece]);   // the shared picture piece + riddle line
+      if (stageRace !== race) return;
       if (!reward) throw new Error('could not open the picture piece');
       const full = Object.assign({}, res, reward); delete full.key;
       saveRes(p.room, full); ping(full.proof);
@@ -327,11 +368,12 @@ window.HUNT = {"v":2,"iters":100000,"title":"The Alchemist's Advent: the Fifth C
   const go = safe(route);
   window.addEventListener('hashchange', go);
 
-  (function init() {
+  (async function init() {
     if (!C.ok) return view(`<div class="card bad"><h2>Please open this page in your phone's main browser</h2>
       <p>This browser window cannot unlock the clues. Open the link in Safari or Chrome (look for “Open in browser”).</p></div>`);
     const pin = store.get('hunt.pin'), team = store.get('hunt.team');
     if (pin && team) { try { const t = JSON.parse(team); if (t && typeof t.name === 'string') session = { pin, team: t }; } catch (e) { session = null; } }
+    await checkRace();
     if (session) ping(session.team.login);
     go();
   })();
