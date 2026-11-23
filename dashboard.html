@@ -196,11 +196,11 @@ function found(i) {
   if (confirm(`Mark ${D.teams[i].name} as having found the treasure?`)) post(`M_${D.org}_${i}`);
 }
 $('start').onclick = () => {
-  const q = 'Start the race NOW?\n\nThis sets time zero for everyone watching and hides all earlier activity (test runs and test logins).';
+  const q = 'Start the race NOW?\n\nTeams will start with zero pieces on their phones. Their PINs and room QR codes stay the same.';
   if (demo) { starts.push(Math.floor(Date.now() / 1000)); dirty = true; } else if (confirm(q)) post(`S_${D.org}`);
 };
 $('undo').onclick = () => {
-  if (demo) { starts.pop(); dirty = true; } else if (confirm('Undo the last race start? Earlier activity becomes visible again.')) post(`U_${D.org}`);
+  if (demo) { starts.pop(); dirty = true; } else if (confirm('Undo the last race start? Teams return to the previous race and its saved pieces.')) post(`U_${D.org}`);
 };
 $('scale').onchange = () => dirty = true;
 
